@@ -74,9 +74,7 @@ class DMCLoCA(DeepMindControl):
         loca_mode="train",
         one_way_wall_radius=0.1,
     ):
-        rt = True if name.startswith("randomizedreacherloca") and random_targets is None else random_targets
-        rt = rt if name.startswith("randomizedreacherloca") else None
-        super().__init__(name, seed, random_targets=rt, size=size, camera=camera)
+        super().__init__(name, seed, random_targets=random_targets, size=size, camera=camera)
         self._loca_phase = loca_phase
         self._loca_mode = loca_mode
 
