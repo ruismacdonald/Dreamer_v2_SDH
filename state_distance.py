@@ -209,6 +209,9 @@ class SimpleContrastiveStateDistanceModel:
         std = np.maximum(std, 1e-3)
         self._repr_std = std
 
+        self._repr_mean_t = torch.as_tensor(self._repr_mean, device=self._device, dtype=torch.float32)
+        self._repr_std_t  = torch.as_tensor(self._repr_std,  device=self._device, dtype=torch.float32)
+
     @torch.no_grad()
     def get_representation(self, obs):
         obs = obs.to(self._device).float()
@@ -216,9 +219,9 @@ class SimpleContrastiveStateDistanceModel:
             obs = obs.unsqueeze(0)
         reprs = self._representation_net(obs).squeeze(0).detach().cpu().numpy()
 
-        if self._normalize_representations and (self._repr_mean is not None):
-            reprs = (reprs - self._repr_mean) / self._repr_std
-            reprs /= (np.linalg.norm(reprs) + 1e-8)
+        if self._normalize_representations and (self._repr_mean_t is not None):
+            reps = (reps - self._repr_mean_t) / self._repr_std_t
+            reps = reps / (reps.norm(dim=-1, keepdim=True) + 1e-8)
         return reprs
 
     def save(self, dname):

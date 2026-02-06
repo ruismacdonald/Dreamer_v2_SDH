@@ -438,6 +438,25 @@ class Dreamer:
         episode_rewards = [0.0]
         obs_list = [] if return_obs else None
 
+        B = 64
+        imgs, trans = [], []
+        
+        def flush():
+            if len(imgs) == 0:
+                return
+            img_t = torch.as_tensor(np.stack(imgs), device=self.device).permute(0,3,1,2).float()
+            img_t = img_t / 255.0 - 0.5
+
+            reps_t = self.state_distance_model.get_representation_torch(img_t)  # (B,D) GPU
+            self.data_buffer._ensure_simhash_matrix(reps_t)
+            keys_t = self.data_buffer._simhash_key(reps_t, self.data_buffer.A_latent_t)  # (B,) GPU
+            keys = keys_t.cpu().tolist()  # python ints
+
+            for (obs, action, reward, done), k in zip(trans, keys):
+                self.data_buffer.add(obs, action, r, d, key_u32=k)
+
+            imgs.clear(); trans.clear()
+            
         for i in range(int(collect_steps)):
             if return_obs:
                 obs_list.append(obs["image"].copy())
@@ -448,30 +467,29 @@ class Dreamer:
                 )
             action = action[0].cpu().numpy()
             next_obs, rew, done, _ = env.step(action)
-
-            rep = None
-            if self.loca_state_distance:
-                img = to_bchw(obs["image"]).to(self.device)
-                rep = self.state_distance_model.get_representation(preprocess_obs(img))
-
-            self.data_buffer.add(obs, action, rew, done, rep)
             episode_rewards[-1] += rew
+
+            if self.loca_state_distance:
+                imgs.append(obs["image"].copy())
+                trans.append((obs, action, rew, done))
+                if len(imgs) == B:
+                    flush()
+            else:
+                self.data_buffer.add(obs, action, rew, done)
 
             if done:
                 obs = env.reset()
                 done = False
                 prev_state = self.rssm.init_state(1, self.device)
-                prev_action = torch.zeros(1, self.action_size).to(self.device)
+                prev_action = torch.zeros(1, self.action_size, device=self.device)
                 if i != collect_steps - 1:
                     episode_rewards.append(0.0)
             else:
                 obs = next_obs
                 prev_state = posterior
-                prev_action = (
-                    torch.tensor(action, dtype=torch.float32)
-                    .to(self.device)
-                    .unsqueeze(0)
-                )
+                prev_action = torch.tensor(action, device=self.device, dtype=torch.float32).unsqueeze(0)
+
+        flush()
 
         if return_obs:
             return np.array(episode_rewards), obs_list
