@@ -376,16 +376,15 @@ class Dreamer:
     def train_one_batch(self):
 
         obs, acs, rews, terms, reward_mask = self.data_buffer.sample()
-        obs = torch.tensor(obs, dtype=torch.float32).to(self.device)
-        acs = torch.tensor(acs, dtype=torch.float32).to(self.device)
-        rews = torch.tensor(rews, dtype=torch.float32).to(self.device).unsqueeze(-1)
+        obs = torch.from_numpy(obs).to(self.device, non_blocking=True)
+        acs = torch.from_numpy(acs).to(self.device, non_blocking=True)
+        rews = torch.from_numpy(rews).to(self.device, non_blocking=True).unsqueeze(-1)
         nonterms = (
-            torch.tensor((1.0 - terms), dtype=torch.float32)
-            .to(self.device)
+            torch.from_numpy((1.0 - terms)).to(self.device, non_blocking=True)
             .unsqueeze(-1)
         )
         reward_mask = (
-            torch.tensor(reward_mask, dtype=torch.float32).to(self.device).unsqueeze(-1)
+            torch.from_numpy(reward_mask).to(self.device, non_blocking=True).unsqueeze(-1)
         )
 
         model_loss, model_loss_terms, rew_loss_stats = self.world_model_loss(obs, acs, rews, nonterms, reward_mask)
@@ -444,16 +443,19 @@ class Dreamer:
         def flush():
             if len(imgs) == 0:
                 return
-            img_t = torch.as_tensor(np.stack(imgs), device=self.device).permute(0,3,1,2).float()
+            img_t = torch.as_tensor(np.stack(imgs), device=self.device).float()  # (B,3,64,64)
+            # Only permute if it's HWC
+            if img_t.ndim == 4 and img_t.shape[-1] in (1, 3):
+                img_t = img_t.permute(0, 3, 1, 2)
             img_t = img_t / 255.0 - 0.5
 
             reps_t = self.state_distance_model.get_representation_torch(img_t)  # (B,D) GPU
             self.data_buffer._ensure_simhash_matrix(reps_t)
-            keys_t = self.data_buffer._simhash_key(reps_t, self.data_buffer.A_latent_t)  # (B,) GPU
+            keys_t = self.data_buffer._simhash_key_u32(reps_t, self.data_buffer.A_latent_t)  # (B,) GPU
             keys = keys_t.cpu().tolist()  # python ints
 
             for (obs, action, reward, done), k in zip(trans, keys):
-                self.data_buffer.add(obs, action, r, d, key_u32=k)
+                self.data_buffer.add(obs, action, reward, done, key_u32=k)
 
             imgs.clear(); trans.clear()
             
@@ -854,7 +856,7 @@ def main():
 
             print("Start training state distance model.")
             
-            state_distance_model.train(dreamer.data_buffer.get_data())
+            state_distance_model.train(dreamer.data_buffer.get_data(), args.seed)
             print("normalize:", state_distance_model._normalize_representations,
                   "mean set:", state_distance_model._repr_mean is not None,
                   "std set:", state_distance_model._repr_std is not None)

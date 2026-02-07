@@ -15,7 +15,7 @@ class ReplayBuffer:
                 which transitions are "kept" vs "discarded" (local forgetting).
 
     SimHash key from the state-distance representation passed to add():
-        dots = rep @ A_latent.T  # (hash_bits,)
+        dots = rep @ A_latent_t.T  # (hash_bits,)
         bits = (dots >= 0).astype(np.uint8)  # (hash_bits,)
         packed = np.packbits(bits, bitorder=...)  # bytes key
         key = bytes(packed)
@@ -50,6 +50,8 @@ class ReplayBuffer:
         seed: int = 0,
         packbit_order: str = "little",
     ):
+        self._rng = np.random.default_rng(seed)
+        
         self.size = int(size)
         self.obs_shape = tuple(obs_shape)
         self.action_size = int(action_size)
@@ -94,7 +96,6 @@ class ReplayBuffer:
 
             # Representation dim is unknown until we see the first representation
             self.obs_repr_size = None  # inferred later
-            self.A_latent = None  # (hash_bits, obs_repr_size) created lazily
 
     def _flat_add(self, idx: int) -> None:
         """Add idx to the flat kept-set if not present."""
@@ -120,7 +121,7 @@ class ReplayBuffer:
 
     # SimHash helpers
     def _ensure_simhash_matrix(self, rep_t: torch.Tensor) -> None:
-        """Initialize A_latent once we know the representation dim"""
+        """Initialize A_latent_t once we know the representation dim"""
         # rep_t: (B, D) or (D,)
         D = int(rep_t.shape[-1])
         if self.obs_repr_size is None:
@@ -133,8 +134,13 @@ class ReplayBuffer:
             # store torch copy on the device where reps live
             self.A_latent_t = torch.as_tensor(A, device=rep_t.device, dtype=torch.float32)
             
-    def _simhash_key(self, rep_t: torch.Tensor, A_t: torch.Tensor) -> bytes:
+    def _simhash_key_u32(self, rep_t: torch.Tensor, A_t: torch.Tensor) -> torch.Tensor:
         """
+        u32 = unsigned 32-bit integer
+        We 32 hash bits (hash_bits = 32, those 32 bits can be packed into a single integer in 
+        the range 0 to 2^32 − 1.
+        key_u32 = the SimHash key stored as one 32-bit unsigned int (is tiny bc 1 number, is much faster)
+
         rep_t: (B, D) float32 on GPU
         A_t: (32, D) float32 on GPU, row-normalized
         returns: (B,) torch.int64 keys (each fits in 32 bits), bytes (packed bits) to use as dict key.
@@ -147,7 +153,7 @@ class ReplayBuffer:
         keys = (bits * weights).sum(dim=-1)  # (B,) int64, values < 2^32
         return keys
 
-    def _get_fifo(self, key_u32: bytes) -> deque:
+    def _get_fifo(self, key_u32: int) -> deque:
         """
         Return the per-hash FIFO for this key.
 
@@ -155,10 +161,10 @@ class ReplayBuffer:
         - idx is the global ring slot index
         - insert_id is the generation stamp for that slot at insertion time
         """
-        fifo = self.loca_indices.get(key)
+        fifo = self.loca_indices.get(key_u32)
         if fifo is None:
             fifo = deque()  # capacity enforced manually so we can handle stale entries cleanly
-            self.loca_indices[key] = fifo
+            self.loca_indices[key_u32] = fifo
         return fifo
 
     def add(self, obs, action, reward, done, rep_t=None, key_u32=None):
@@ -192,7 +198,7 @@ class ReplayBuffer:
                     rep_t = rep_t.unsqueeze(0)  # (1,D)
 
                 self._ensure_simhash_matrix(rep_t)
-                key_t = self.simhash_key(rep_t, self.A_latent_t)  # (1,)
+                key_t = self._simhash_key_u32(rep_t, self.A_latent_t)  # (1,)
                 key_u32 = int(key_t[0].item())  # tiny CPU transfer (one int)
 
             # Stamp this slot-version
@@ -229,10 +235,14 @@ class ReplayBuffer:
 
     def _sample_idx(self, L):
         """Standard Dreamer sampling from the global ring."""
+        if (not self.full) and (self.idx <= L):
+            raise RuntimeError(f"Not enough data to sample: idx={self.idx}, L={L}")
+
         valid_idx = False
         while not valid_idx:
-            idx = np.random.randint(0, self.size if self.full else self.idx - L)
-            idxs = np.arange(idx, idx + L) % self.size
+            upper = self.size if self.full else (self.idx - L)
+            idx = int(self._rng.integers(0, upper))
+            idxs = (np.arange(idx, idx + L) % self.size).astype(np.int64)
             valid_idx = self.idx not in idxs[1:]
         return idxs
     
@@ -243,7 +253,7 @@ class ReplayBuffer:
 
         valid_idx = False
         while not valid_idx:
-            start = int(np.random.choice(self.loca_indices_flat))
+            start = int(self._rng.choice(self.loca_indices_flat))
             idxs = (np.arange(start, start + L) % self.size).astype(np.int64)
             # match original: don't cross the current write position in the middle of a sequence
             valid_idx = self.idx not in idxs[1:]

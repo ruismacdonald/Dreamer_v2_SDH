@@ -7,10 +7,10 @@ from torch.utils.data import Dataset, DataLoader
 
 
 class ContrastiveStateDistanceDataset(Dataset):
-    def __init__(self, observation_pairs, num_negative_samples=128, transform=None):
+    def __init__(self, observation_pairs, num_negative_samples=128, seed=0):
         self.data = observation_pairs
         self.num_negative_samples = num_negative_samples
-        self.transform = transform
+        self._rng = np.random.default_rng(seed)
 
     def __len__(self):
         return len(self.data)
@@ -21,9 +21,7 @@ class ContrastiveStateDistanceDataset(Dataset):
 
         obs, positive = self.data[idx]
 
-        # TODO use a proper seeding
-        # indices = self._rng.integers(len(self.data), size=self.num_negative_samples)
-        indices = np.random.randint(len(self.data), size=self.num_negative_samples)
+        indices = self._rng.integers(len(self.data), size=self.num_negative_samples)
         negatives = np.array([self.data[ind][0] for ind in indices])
 
         return obs, positive, negatives
@@ -130,7 +128,7 @@ class SimpleContrastiveStateDistanceModel:
         self._repr_mean = None
         self._repr_std = None
 
-    def prepare_train_loader(self, data):
+    def prepare_train_loader(self, data, seed):
         observation_pairs = []
         for i in range(data["observation"].shape[0] - 1):
             if data["terminal"][i]:
@@ -139,9 +137,11 @@ class SimpleContrastiveStateDistanceModel:
                 (data["observation"][i], data["observation"][i + 1])
             )
         train_dataset = ContrastiveStateDistanceDataset(
-            observation_pairs, self._num_negative_samples
+            observation_pairs, self._num_negative_samples, seed=seed
         )
-        return DataLoader(train_dataset, batch_size=self._batch_size, shuffle=True)
+        g = torch.Generator()
+        g.manual_seed(seed)
+        return DataLoader(train_dataset, batch_size=self._batch_size, shuffle=True, generator=g)
 
     def calculate_loss(self, obs, positive, negatives):
         obs_repr = self._representation_net(obs)
@@ -166,8 +166,8 @@ class SimpleContrastiveStateDistanceModel:
         )
         return loss
 
-    def train(self, buffer_data):
-        train_loader = self.prepare_train_loader(buffer_data)
+    def train(self, buffer_data, seed):
+        train_loader = self.prepare_train_loader(buffer_data, seed)
         self._representation_net.train()
         for _ in range(self._num_training_epochs):
             running_loss, dataset_size = 0, 0
@@ -213,16 +213,16 @@ class SimpleContrastiveStateDistanceModel:
         self._repr_std_t  = torch.as_tensor(self._repr_std,  device=self._device, dtype=torch.float32)
 
     @torch.no_grad()
-    def get_representation(self, obs):
-        obs = obs.to(self._device).float()
-        if obs.ndim == 3:
-            obs = obs.unsqueeze(0)
-        reprs = self._representation_net(obs).squeeze(0).detach().cpu().numpy()
+    def get_representation_torch(self, obs_bchw: torch.Tensor) -> torch.Tensor:
+        # obs_bchw: (B,C,H,W) float32 on device
+        self._representation_net.eval()
+        reps = self._representation_net(obs_bchw)
 
         if self._normalize_representations and (self._repr_mean_t is not None):
             reps = (reps - self._repr_mean_t) / self._repr_std_t
             reps = reps / (reps.norm(dim=-1, keepdim=True) + 1e-8)
-        return reprs
+
+        return reps
 
     def save(self, dname):
         torch.save(
