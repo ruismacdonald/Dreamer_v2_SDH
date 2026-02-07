@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=dreamer_v2_sdh_rr
+#SBATCH --job-name=d_v2_sdh_rr
 #SBATCH --account=def-rsdjjana
 #SBATCH --time=6-23:59:59
 #SBATCH --gres=gpu:1
