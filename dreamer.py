@@ -428,7 +428,7 @@ class Dreamer:
 
         return posterior, action
 
-    def act_and_collect_data(self, env, collect_steps, return_obs=False):
+    def act_and_collect_data(self, env, collect_steps, return_obs=False, collect_rep_stats=False):
         obs = env.reset()
         done = False
         prev_state = self.rssm.init_state(1, self.device)
@@ -448,6 +448,10 @@ class Dreamer:
             if img_t.ndim == 4 and img_t.shape[-1] in (1, 3):
                 img_t = img_t.permute(0, 3, 1, 2)
             img_t = img_t / 255.0 - 0.5
+
+            if collect_rep_stats and (self.state_distance_model is not None):
+                # Update streaming rep stats from the SAME batches we already process.
+                self.state_distance_model.update_representation_stats_accum(img_t)
 
             reps_t = self.state_distance_model.get_representation_torch(img_t)  # (B,D) GPU
             self.data_buffer._ensure_simhash_matrix(reps_t)
@@ -932,12 +936,20 @@ def main():
                 loca_phase = "phase_2"
                 train_env = make_env(args, loca_phase, "train")
                 test_env = make_env(args, loca_phase, "eval")
-                _, phase2_obs = dreamer.act_and_collect_data(train_env, collect_steps=3e5, return_obs=True)
-                phase2_data = {
-                    "observation": (np.stack(phase2_obs).astype(np.float32) / 255.0 - 0.5),
-                    "terminal": np.zeros((len(phase2_obs),), dtype=np.float32),
-                }
-                dreamer.state_distance_model.learn_representation_stats(phase2_data)
+                
+                # Start streaming stats accumulation for p2 reps
+                dreamer.state_distance_model.reset_representation_stats_accum()
+
+                # Collect 3e5 steps while updating stats in flush batches (no giant arrays)
+                _ = dreamer.act_and_collect_data(
+                    train_env,
+                    collect_steps=1e5,
+                    return_obs=False,
+                    collect_rep_stats=True,
+                )
+
+                # Finalize stats and start using them for normalization going forward
+                dreamer.state_distance_model.finalize_representation_stats_accum(clamp_std=1e-3)
 
                 # Recompute logdir + logger here so phase_2 results save in phase_2 dir
                 logdir = os.path.join(data_path, args.exp_name, str(args.seed), loca_phase)
