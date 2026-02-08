@@ -543,7 +543,7 @@ class Dreamer:
             rep = None
             if self.loca_state_distance:
                 img = to_bchw(obs["image"]).to(self.device)
-                rep = self.state_distance_model.get_representation(preprocess_obs(img))
+                rep = self.state_distance_model.get_representation_torch(preprocess_obs(img))
                 
             self.data_buffer.add(obs, action, rew, done, rep)
             seed_episode_rews[-1] += rew
