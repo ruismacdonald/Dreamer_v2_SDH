@@ -928,7 +928,7 @@ def main():
                 loca_phase = "phase_2"
                 train_env = make_env(args, loca_phase, "train")
                 test_env = make_env(args, loca_phase, "eval")
-                _, phase2_obs = dreamer.act_and_collect_data(train_env, collect_steps=3e5, return_obs=True)
+                _, phase2_obs = dreamer.act_and_collect_data(train_env, collect_steps=3e5, return_obs=True, explore=False)
                 phase2_data = {
                     "observation": (np.stack(phase2_obs).astype(np.float32) / 255.0 - 0.5),
                     "terminal": np.zeros((len(phase2_obs),), dtype=np.float32),
