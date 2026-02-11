@@ -851,9 +851,11 @@ def main():
         print("Start training state distance model.")
         
         state_distance_model.train(dreamer.data_buffer.get_data(), args.seed)
-        print("normalize:", state_distance_model._normalize_representations,
-                "mean set:", state_distance_model._repr_mean_t is not None,
-                "std set:", state_distance_model._repr_std_t is not None)
+        print(
+            "normalize:", state_distance_model._normalize_representations,
+            "mean set:", getattr(state_distance_model, "_repr_mean_t", None) is not None,
+            "std set:", getattr(state_distance_model, "_repr_std_t", None) is not None,
+        )
 
         ckpt_dir = os.path.join(logdir, "ckpts/")
         if not (os.path.exists(ckpt_dir)):

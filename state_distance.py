@@ -125,8 +125,8 @@ class SimpleContrastiveStateDistanceModel:
         self._batch_size = int(batch_size)
 
         self._normalize_representations = bool(normalize_representations)
-        self._repr_mean = None
-        self._repr_std = None
+        self._repr_mean_t = None
+        self._repr_std_t = None
 
     def prepare_train_loader(self, data, seed):
         observation_pairs = []
