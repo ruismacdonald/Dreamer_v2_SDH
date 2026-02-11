@@ -15,7 +15,7 @@ class ReplayBuffer:
                 which transitions are "kept" vs "discarded" (local forgetting).
 
     SimHash key from the state-distance representation passed to add():
-        dots = rep @ A_latent_t.T  # (hash_bits,)
+        dots = rep @ A_latent.T  # (hash_bits,)
         bits = (dots >= 0).astype(np.uint8)  # (hash_bits,)
         packed = np.packbits(bits, bitorder=...)  # bytes key
         key = bytes(packed)
@@ -50,8 +50,6 @@ class ReplayBuffer:
         seed: int = 0,
         packbit_order: str = "little",
     ):
-        self._rng = np.random.default_rng(seed)
-        
         self.size = int(size)
         self.obs_shape = tuple(obs_shape)
         self.action_size = int(action_size)
@@ -96,6 +94,7 @@ class ReplayBuffer:
 
             # Representation dim is unknown until we see the first representation
             self.obs_repr_size = None  # inferred later
+            self.A_latent = None  # (hash_bits, obs_repr_size) created lazily
 
     def _flat_add(self, idx: int) -> None:
         """Add idx to the flat kept-set if not present."""
@@ -115,45 +114,36 @@ class ReplayBuffer:
         self.loca_indices_flat.pop()
         self.flat_pos[idx] = -1
 
-    def _invalidate_slot_membership(self, i: int):
-        if self.flat_pos[i] != -1:
-            self._flat_remove(i)
-
     # SimHash helpers
-    def _ensure_simhash_matrix(self, rep_t: torch.Tensor) -> None:
-        """Initialize A_latent_t once we know the representation dim"""
-        # rep_t: (B, D) or (D,)
-        D = int(rep_t.shape[-1])
+    def _ensure_simhash_matrix(self, rep: np.ndarray) -> None:
+        """Initialize A_latent once we know the representation dim"""
+        rep = np.asarray(rep, dtype=np.float32).reshape(-1)
+
         if self.obs_repr_size is None:
-            self.obs_repr_size = D
-
+            self.obs_repr_size = int(rep.shape[0])
             rng = np.random.default_rng(self._seed)
-            A = rng.standard_normal(size=(self.hash_bits, D)).astype(np.float32)
-            A /= (np.linalg.norm(A, axis=1, keepdims=True) + 1e-8)
+            A = rng.standard_normal(size=(self.hash_bits, self.obs_repr_size)).astype(np.float32)
 
-            # store torch copy on the device where reps live
-            self.A_latent_t = torch.as_tensor(A, device=rep_t.device, dtype=torch.float32)
+            norms = np.linalg.norm(A, axis=1, keepdims=True)
+            norms[norms == 0] = 1.0  # divide-by-zero guard, if row of A is zero norm (all 0s) set to 1 (stays all 0s after division)
+            self.A_latent = A / norms
             
-    def _simhash_key_u32(self, rep_t: torch.Tensor, A_t: torch.Tensor) -> torch.Tensor:
+    def _simhash_key(self, rep: np.ndarray) -> bytes:
         """
-        u32 = unsigned 32-bit integer
-        We 32 hash bits (hash_bits = 32, those 32 bits can be packed into a single integer in 
-        the range 0 to 2^32 − 1.
-        key_u32 = the SimHash key stored as one 32-bit unsigned int (is tiny bc 1 number, is much faster)
+        rep: shape (obs_repr_size,)
 
-        rep_t: (B, D) float32 on GPU
-        A_t: (32, D) float32 on GPU, row-normalized
-        returns: (B,) torch.int64 keys (each fits in 32 bits), bytes (packed bits) to use as dict key.
+        Returns: bytes (packed bits) to use as dict key.
         """
-        dots = rep_t @ A_t.T  # (B, 32)
-        bits = (dots >= 0).to(torch.int64)  # (B, 32) in {0,1}
+        rep = np.asarray(rep, dtype=np.float32).reshape(-1)
+        self._ensure_simhash_matrix(rep)
 
-        # bit 0 = least significant bit (LSB) (matches "little" convention)
-        weights = (1 << torch.arange(32, device=rep_t.device, dtype=torch.int64))  # (32,)
-        keys = (bits * weights).sum(dim=-1)  # (B,) int64, values < 2^32
-        return keys
+        # Now rep dim matches A_latent by construction
+        dots = rep @ self.A_latent.T  # (hash_bits,)
+        bits = (dots >= 0).astype(np.uint8)  # (hash_bits,)
+        packed = np.packbits(bits, bitorder=self.packbit_order)
+        return packed.tobytes()
 
-    def _get_fifo(self, key_u32: int) -> deque:
+    def _get_fifo(self, key: bytes) -> deque:
         """
         Return the per-hash FIFO for this key.
 
@@ -161,13 +151,13 @@ class ReplayBuffer:
         - idx is the global ring slot index
         - insert_id is the generation stamp for that slot at insertion time
         """
-        fifo = self.loca_indices.get(key_u32)
+        fifo = self.loca_indices.get(key)
         if fifo is None:
             fifo = deque()  # capacity enforced manually so we can handle stale entries cleanly
-            self.loca_indices[key_u32] = fifo
+            self.loca_indices[key] = fifo
         return fifo
 
-    def add(self, obs, action, reward, done, rep_t=None, key_u32=None):
+    def add(self, obs, action, reward, done, rep=None):
         """
         observation: dict with key "image"
         action: action vector
@@ -176,10 +166,6 @@ class ReplayBuffer:
         representation: torch.Tensor or np.ndarray, required if distance_process=True
         """
         i = self.idx
-        if self.distance_process:
-            # Overwriting slot i due to circular replay: remove stale kept-start membership; we'll 
-            # re-add for the new transition (kept-start mirrors reward_mask).
-            self._invalidate_slot_membership(i)
 
         # Write to global ring (always)
         self.observations[i] = obs["image"]
@@ -189,37 +175,34 @@ class ReplayBuffer:
         self.reward_mask[i] = 1.0  # temporally overwritten (circular) slots become valid again
 
         if self.distance_process:
-            if key_u32 is None:
-                if rep_t is None:
-                    raise ValueError("Need rep_t or key_u32 when distance_process=True")
+            if rep is None:
+                raise ValueError("distance_process=True requires `representation` in add().")
 
-                # rep_t should be torch on GPU (D,) or (1,D)
-                if rep_t.ndim == 1:
-                    rep_t = rep_t.unsqueeze(0)  # (1,D)
-
-                self._ensure_simhash_matrix(rep_t)
-                key_t = self._simhash_key_u32(rep_t, self.A_latent_t)  # (1,)
-                key_u32 = int(key_t[0].item())  # tiny CPU transfer (one int)
+            if isinstance(rep, torch.Tensor):
+                rep = rep.detach().cpu().numpy().astype(np.float32).reshape(-1)
+            else:
+                rep = np.asarray(rep, dtype=np.float32).reshape(-1)
 
             # Stamp this slot-version
             self._global_insert_id += 1
             self.insert_id[i] = self._global_insert_id
 
-            fifo = self._get_fifo(key_u32)
+            key = self._simhash_key(rep)
+            fifo = self._get_fifo(key)
 
-            # Ensure this new idx is eligible as a start index
+            # Ensure this new idx is eligible as a START index
             self._flat_add(i)
 
             # Add (idx, insert_id) so old references become stale on overwrite
             fifo.append((i, self.insert_id[i]))
 
-            # If bucket too large, discard oldest valid (still-current) entry
+            # If bucket too large, discard oldest LIVE entry
             while len(fifo) > self.fifo_capacity:
                 disc_idx, disc_ins_idx = fifo.popleft()
                 # stale? (slot reused since it was bucketed) -> ignore
                 if self.insert_id[disc_idx] != disc_ins_idx:
                     continue
-                # valid eviction: mark discarded + remove from start pool
+                # live eviction: mark discarded + remove from start pool
                 if self.reward_mask[disc_idx] != 0.0:
                     self.reward_mask[disc_idx] = 0.0
                     self._flat_remove(disc_idx)
@@ -235,14 +218,10 @@ class ReplayBuffer:
 
     def _sample_idx(self, L):
         """Standard Dreamer sampling from the global ring."""
-        if (not self.full) and (self.idx <= L):
-            raise RuntimeError(f"Not enough data to sample: idx={self.idx}, L={L}")
-
         valid_idx = False
         while not valid_idx:
-            upper = self.size if self.full else (self.idx - L)
-            idx = int(self._rng.integers(0, upper))
-            idxs = (np.arange(idx, idx + L) % self.size).astype(np.int64)
+            idx = np.random.randint(0, self.size if self.full else self.idx - L)
+            idxs = np.arange(idx, idx + L) % self.size
             valid_idx = self.idx not in idxs[1:]
         return idxs
     
@@ -253,7 +232,7 @@ class ReplayBuffer:
 
         valid_idx = False
         while not valid_idx:
-            start = int(self._rng.choice(self.loca_indices_flat))
+            start = int(np.random.choice(self.loca_indices_flat))
             idxs = (np.arange(start, start + L) % self.size).astype(np.int64)
             # match original: don't cross the current write position in the middle of a sequence
             valid_idx = self.idx not in idxs[1:]
@@ -303,8 +282,6 @@ class ReplayBuffer:
                 "max": int(np.max(fifo_sizes)) if fifo_sizes else 0,
                 "mean": float(np.mean(fifo_sizes)) if fifo_sizes else 0.0,
             },
-            "reward_mask_sum_global": float(self.reward_mask.sum()),
-            "reward_mask_mean_global": float(self.reward_mask.mean()),
         }
 
     def get_data(self):

@@ -376,15 +376,16 @@ class Dreamer:
     def train_one_batch(self):
 
         obs, acs, rews, terms, reward_mask = self.data_buffer.sample()
-        obs = torch.from_numpy(obs).to(self.device, non_blocking=True)
-        acs = torch.from_numpy(acs).to(self.device, non_blocking=True)
-        rews = torch.from_numpy(rews).to(self.device, non_blocking=True).unsqueeze(-1)
+        obs = torch.tensor(obs, dtype=torch.float32).to(self.device)
+        acs = torch.tensor(acs, dtype=torch.float32).to(self.device)
+        rews = torch.tensor(rews, dtype=torch.float32).to(self.device).unsqueeze(-1)
         nonterms = (
-            torch.from_numpy((1.0 - terms)).to(self.device, non_blocking=True)
+            torch.tensor((1.0 - terms), dtype=torch.float32)
+            .to(self.device)
             .unsqueeze(-1)
         )
         reward_mask = (
-            torch.from_numpy(reward_mask).to(self.device, non_blocking=True).unsqueeze(-1)
+            torch.tensor(reward_mask, dtype=torch.float32).to(self.device).unsqueeze(-1)
         )
 
         model_loss, model_loss_terms, rew_loss_stats = self.world_model_loss(obs, acs, rews, nonterms, reward_mask)
@@ -428,40 +429,16 @@ class Dreamer:
 
         return posterior, action
 
-    def act_and_collect_data(self, env, collect_steps, return_obs=False):
+    def act_and_collect_data(self, env, collect_steps):
+
         obs = env.reset()
         done = False
         prev_state = self.rssm.init_state(1, self.device)
         prev_action = torch.zeros(1, self.action_size).to(self.device)
 
         episode_rewards = [0.0]
-        obs_list = [] if return_obs else None
 
-        B = 64
-        imgs, trans = [], []
-        
-        def flush():
-            if len(imgs) == 0:
-                return
-            img_t = torch.as_tensor(np.stack(imgs), device=self.device).float()  # (B,3,64,64)
-            # Only permute if it's HWC
-            if img_t.ndim == 4 and img_t.shape[-1] in (1, 3):
-                img_t = img_t.permute(0, 3, 1, 2)
-            img_t = img_t / 255.0 - 0.5
-
-            reps_t = self.state_distance_model.get_representation_torch(img_t)  # (B,D) GPU
-            self.data_buffer._ensure_simhash_matrix(reps_t)
-            keys_t = self.data_buffer._simhash_key_u32(reps_t, self.data_buffer.A_latent_t)  # (B,) GPU
-            keys = keys_t.cpu().tolist()  # python ints
-
-            for (obs, action, reward, done), k in zip(trans, keys):
-                self.data_buffer.add(obs, action, reward, done, key_u32=k)
-
-            imgs.clear(); trans.clear()
-            
-        for i in range(int(collect_steps)):
-            if return_obs:
-                obs_list.append(obs["image"].copy())
+        for i in range(collect_steps):
 
             with torch.no_grad():
                 posterior, action = self.act_with_world_model(
@@ -469,32 +446,31 @@ class Dreamer:
                 )
             action = action[0].cpu().numpy()
             next_obs, rew, done, _ = env.step(action)
-            episode_rewards[-1] += rew
-
+            rep = None
             if self.loca_state_distance:
-                imgs.append(obs["image"].copy())
-                trans.append((obs, action, rew, done))
-                if len(imgs) == B:
-                    flush()
-            else:
-                self.data_buffer.add(obs, action, rew, done)
+                img = to_bchw(obs["image"]).to(self.device)
+                rep = self.state_distance_model.get_representation(preprocess_obs(img))
+
+            self.data_buffer.add(obs, action, rew, done, rep)
+
+            episode_rewards[-1] += rew
 
             if done:
                 obs = env.reset()
                 done = False
                 prev_state = self.rssm.init_state(1, self.device)
-                prev_action = torch.zeros(1, self.action_size, device=self.device)
+                prev_action = torch.zeros(1, self.action_size).to(self.device)
                 if i != collect_steps - 1:
                     episode_rewards.append(0.0)
             else:
                 obs = next_obs
                 prev_state = posterior
-                prev_action = torch.tensor(action, device=self.device, dtype=torch.float32).unsqueeze(0)
+                prev_action = (
+                    torch.tensor(action, dtype=torch.float32)
+                    .to(self.device)
+                    .unsqueeze(0)
+                )
 
-        flush()
-
-        if return_obs:
-            return np.array(episode_rewards), obs_list
         return np.array(episode_rewards)
 
     def evaluate(self, env, eval_episodes, render=False):
@@ -543,7 +519,7 @@ class Dreamer:
             rep = None
             if self.loca_state_distance:
                 img = to_bchw(obs["image"]).to(self.device)
-                rep = self.state_distance_model.get_representation_torch(preprocess_obs(img))
+                rep = self.state_distance_model.get_representation(preprocess_obs(img))
                 
             self.data_buffer.add(obs, action, rew, done, rep)
             seed_episode_rews[-1] += rew
@@ -831,9 +807,6 @@ def main():
     obs_shape = train_env.observation_space["image"].shape
     action_size = train_env.action_space.shape[0]
     dreamer = Dreamer(args, obs_shape, action_size, device, args.restore)
-    # If resuming, force the step counter used by phase switching/logging
-    if args.restore and args.resume_steps > 0:
-        dreamer.data_buffer.steps = args.resume_steps // args.action_repeat
 
     logger = Logger(logdir)
 
@@ -850,12 +823,10 @@ def main():
 
         print("Start training state distance model.")
         
-        state_distance_model.train(dreamer.data_buffer.get_data(), args.seed)
-        print(
-            "normalize:", state_distance_model._normalize_representations,
-            "mean set:", getattr(state_distance_model, "_repr_mean_t", None) is not None,
-            "std set:", getattr(state_distance_model, "_repr_std_t", None) is not None,
-        )
+        state_distance_model.train(dreamer.data_buffer.get_data())
+        print("normalize:", state_distance_model._normalize_representations,
+                "mean set:", state_distance_model._repr_mean is not None,
+                "std set:", state_distance_model._repr_std is not None)
 
         ckpt_dir = os.path.join(logdir, "ckpts/")
         if not (os.path.exists(ckpt_dir)):
@@ -928,12 +899,6 @@ def main():
                 loca_phase = "phase_2"
                 train_env = make_env(args, loca_phase, "train")
                 test_env = make_env(args, loca_phase, "eval")
-                _, phase2_obs = dreamer.act_and_collect_data(train_env, collect_steps=3e5, return_obs=True, explore=False)
-                phase2_data = {
-                    "observation": (np.stack(phase2_obs).astype(np.float32) / 255.0 - 0.5),
-                    "terminal": np.zeros((len(phase2_obs),), dtype=np.float32),
-                }
-                dreamer.state_distance_model.learn_representation_stats(phase2_data)
 
                 # Recompute logdir + logger here so phase_2 results save in phase_2 dir
                 logdir = os.path.join(data_path, args.exp_name, str(args.seed), loca_phase)
