@@ -76,6 +76,10 @@ class ReplayBuffer:
         self.insert_id = np.zeros(self.size, dtype=np.int64)  # generation stamp per slot
         self._global_insert_id = 0
 
+        # Use a dedicated RNG so we never call np.random.choice() on a Python list
+        # (np.random.choice(list) converts list -> array each call, which is slow).
+        self._rng = np.random.default_rng(seed)
+
         # SimHash-bucketed state
         if self.distance_process:
             self.hash_bits = int(obs_hash_size)  # SimHash bits
@@ -219,22 +223,22 @@ class ReplayBuffer:
     def _sample_idx(self, L):
         """Standard Dreamer sampling from the global ring."""
         valid_idx = False
+        hi = (self.size if self.full else self.idx - L)
         while not valid_idx:
-            idx = np.random.randint(0, self.size if self.full else self.idx - L)
+            idx = int(self._rng.integers(0, hi))
             idxs = np.arange(idx, idx + L) % self.size
             valid_idx = self.idx not in idxs[1:]
         return idxs
     
     def _sample_idx_distance(self, L: int):
-        """Distance-process sampling: choose START from currently-kept indices, then return temporal window."""
+        """Distance-process sampling: choose start from currently-kept indices, then return temporal window."""
         if len(self.loca_indices_flat) == 0:
             raise RuntimeError("No kept indices available yet (loca_indices_flat is empty).")
 
         valid_idx = False
         while not valid_idx:
-            start = int(np.random.choice(self.loca_indices_flat))
+            start = self.loca_indices_flat[int(self._rng.integers(0, len(self.loca_indices_flat)))]
             idxs = (np.arange(start, start + L) % self.size).astype(np.int64)
-            # match original: don't cross the current write position in the middle of a sequence
             valid_idx = self.idx not in idxs[1:]
         return idxs
 
@@ -286,14 +290,10 @@ class ReplayBuffer:
 
     def get_data(self):
         N = self.size if self.full else self.idx
-        observations = torch.as_tensor(self.observations[: N].copy().astype(np.float32))
-        # uint8 [0,255] -> float32 [-0.5, 0.5]
-        observations = observations.to(torch.float32) / 255.0 - 0.5
-        observations = observations.detach().cpu().numpy()
-
         data = {
-            "observation": observations,
-            "terminal": self.terminals[: N].copy(),
+            # keep as uint8, no torch, no float32, no normalization here
+            "observation": self.observations[:N],   # uint8
+            "terminal": self.terminals[:N].copy(),
         }
         if self.distance_process:
             data.update({"loca_indices_flat": self.loca_indices_flat.copy()})

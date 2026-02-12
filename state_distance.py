@@ -38,6 +38,11 @@ def calculate_output_dim(net, input_shape):
     return output.size()[1:]
 
 
+def preprocess_uint8_batch(x: torch.Tensor) -> torch.Tensor:
+    # x: uint8 BCHW
+    return x.to(torch.float32).div_(255.0).sub_(0.5)
+
+
 class ContrastiveStateDistanceNet(nn.Module):
     def __init__(
         self,
@@ -145,7 +150,7 @@ class SimpleContrastiveStateDistanceModel:
         train_dataset = ContrastiveStateDistanceDataset(
             observation_pairs, num_negative_samples=self._num_negative_samples, seed=self._seed
         )
-        return DataLoader(train_dataset, batch_size=self._batch_size, shuffle=True)
+        return DataLoader(train_dataset, batch_size=self._batch_size, shuffle=True, pin_memory=True, num_workers = 4, persistent_workers=True)
 
     def calculate_loss_terms(self, obs, positive, negatives):
         obs_repr = self._representation_net(obs)
@@ -191,11 +196,18 @@ class SimpleContrastiveStateDistanceModel:
             count = 0
 
             for i, data in enumerate(train_loader, 0):
-                obs, positive, negatives = (
-                    data[0].float().to(self._device),
-                    data[1].float().to(self._device),
-                    data[2].float().to(self._device),
-                )
+                obs, positive, negatives = data  # likely uint8 if you keep it that way
+
+                obs = obs.to(self._device, non_blocking=True)
+                positive = positive.to(self._device, non_blocking=True)
+                negatives = negatives.to(self._device, non_blocking=True)
+
+                obs = preprocess_uint8_batch(obs)
+                positive = preprocess_uint8_batch(positive)
+
+                # negatives: (B, K, C, H, W) uint8 -> float32
+                negatives = negatives.to(torch.float32).div_(255.0).sub_(0.5)
+                
                 self._optimizer.zero_grad()
                 loss, stats = self.calculate_loss_terms(obs, positive, negatives)
                 loss.backward()
@@ -224,9 +236,10 @@ class SimpleContrastiveStateDistanceModel:
     @torch.no_grad()
     def learn_representation_stats(self, data):
         """Compute mean/std of representations for normalization."""
-        obs = torch.as_tensor(data["observation"], device=self._device).float()
+        obs = torch.as_tensor(data["observation"], device=self._device)  # uint8
         if obs.ndim == 4 and obs.shape[-1] in (1, 3):
             obs = obs.permute(0, 3, 1, 2)
+        obs = obs.to(torch.float32).div_(255.0).sub_(0.5)
 
         self._representation_net.eval()
         reprs = self._representation_net(obs).detach().cpu().numpy()  # (N, D)
@@ -262,9 +275,16 @@ class SimpleContrastiveStateDistanceModel:
 
     @torch.no_grad()
     def get_representation(self, obs):
-        obs = obs.to(self._device).float()
+        # obs is BCHW (uint8 or float)
+        obs = obs.to(self._device, non_blocking=True)
+        if obs.dtype != torch.uint8:
+            obs = obs.to(torch.uint8)  # optional, if you want strictness
+
+        obs = obs.to(torch.float32).div_(255.0).sub_(0.5)
+
         if obs.ndim == 3:
             obs = obs.unsqueeze(0)
+
         reprs = self._representation_net(obs).squeeze(0).detach().cpu().numpy()
 
         if self._normalize_representations and (self._repr_mean is not None):

@@ -39,24 +39,16 @@ def preprocess_obs(obs):
     return obs
 
 def to_bchw(img) -> torch.Tensor:
-    """
-    Accepts np array or torch tensor.
-    Returns float32 torch tensor with shape (1, C, H, W).
-    Handles HWC -> CHW if needed.
-    """
-    if not isinstance(img, torch.Tensor):
-        img = torch.tensor(img)
+    # img is usually np.uint8 CHW (from env wrapper)
+    if isinstance(img, np.ndarray):
+        t = torch.from_numpy(img)  # zero-copy CPU
+    else:
+        t = img
 
-    # If HWC (common from envs), convert to CHW
-    if img.ndim == 3 and img.shape[-1] in (1, 3):
-        img = img.permute(2, 0, 1)
+    if t.ndim == 3:
+        t = t.unsqueeze(0)  # (1,C,H,W)
 
-    # If CHW, add batch dim
-    if img.ndim == 3:
-        img = img.unsqueeze(0)
-
-    # Now should be BCHW
-    return img.to(torch.float32)
+    return t
 
 
 class Dreamer:
@@ -376,17 +368,12 @@ class Dreamer:
     def train_one_batch(self):
 
         obs, acs, rews, terms, reward_mask = self.data_buffer.sample()
-        obs = torch.tensor(obs, dtype=torch.float32).to(self.device)
-        acs = torch.tensor(acs, dtype=torch.float32).to(self.device)
-        rews = torch.tensor(rews, dtype=torch.float32).to(self.device).unsqueeze(-1)
-        nonterms = (
-            torch.tensor((1.0 - terms), dtype=torch.float32)
-            .to(self.device)
-            .unsqueeze(-1)
-        )
-        reward_mask = (
-            torch.tensor(reward_mask, dtype=torch.float32).to(self.device).unsqueeze(-1)
-        )
+
+        obs = torch.from_numpy(obs).to(self.device, non_blocking=True)  # uint8 on GPU
+        acs = torch.from_numpy(acs).to(self.device, non_blocking=True)  # float32 already
+        rews = torch.from_numpy(rews).to(self.device, non_blocking=True).unsqueeze(-1)
+        nonterms = torch.from_numpy(1.0 - terms).to(self.device, non_blocking=True).unsqueeze(-1)
+        reward_mask = torch.from_numpy(reward_mask).to(self.device, non_blocking=True).unsqueeze(-1)
 
         model_loss, model_loss_terms, rew_loss_stats = self.world_model_loss(obs, acs, rews, nonterms, reward_mask)
         self.world_model_opt.zero_grad()
@@ -419,8 +406,9 @@ class Dreamer:
 
     def act_with_world_model(self, obs, prev_state, prev_action, explore=False):
 
-        img = to_bchw(obs["image"]).to(self.device)
-        obs_embed = self.obs_encoder(preprocess_obs(img))
+        img = to_bchw(obs["image"]).to(self.device, non_blocking=True)
+        img = img.to(torch.float32).div_(255.0).sub_(0.5)
+        obs_embed = self.obs_encoder(img)
         _, posterior = self.rssm.observe_step(prev_state, prev_action, obs_embed)
         features = torch.cat([posterior["stoch"], posterior["deter"]], dim=-1)
         action = self.actor(features, deter=not explore)
