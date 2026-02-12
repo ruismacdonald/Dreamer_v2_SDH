@@ -275,15 +275,14 @@ class SimpleContrastiveStateDistanceModel:
 
     @torch.no_grad()
     def get_representation(self, obs):
-        # obs is BCHW (uint8 or float)
         obs = obs.to(self._device, non_blocking=True)
-        if obs.dtype != torch.uint8:
-            obs = obs.to(torch.uint8)  # optional, if you want strictness
-
-        obs = obs.to(torch.float32).div_(255.0).sub_(0.5)
-
         if obs.ndim == 3:
             obs = obs.unsqueeze(0)
+
+        if obs.dtype == torch.uint8:
+            obs = obs.to(torch.float32).div_(255.0).sub_(0.5)
+        else:
+            obs = obs.to(torch.float32)  # already in [-0.5, 0.5] from preprocess_obs
 
         reprs = self._representation_net(obs).squeeze(0).detach().cpu().numpy()
 
