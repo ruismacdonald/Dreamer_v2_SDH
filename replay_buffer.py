@@ -237,8 +237,11 @@ class ReplayBuffer:
         while not valid_idx:
             start = int(np.random.choice(self.loca_indices_flat))
 
-            # NEW: if buffer not full, window must stay within written range [0, self.idx)
+            # If buffer isn't full yet, you can't wrap around.
+            # So require the whole window [start, start+L) to be inside [0, self.idx).
             if not self.full:
+                if self.idx < L:
+                    raise RuntimeError(f"Not enough data to sample: idx={self.idx} < L={L}")
                 if start > (self.idx - L):
                     continue
 

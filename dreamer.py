@@ -378,6 +378,9 @@ class Dreamer:
         nonterms = torch.from_numpy(1.0 - terms).to(self.device, non_blocking=True).unsqueeze(-1)
         reward_mask = torch.from_numpy(reward_mask).to(self.device, non_blocking=True).unsqueeze(-1)
 
+        assert reward_mask.shape[0] == self.args.train_seq_len
+        assert reward_mask.shape[1] == self.args.batch_size
+
         model_loss, model_loss_terms, rew_loss_stats = self.world_model_loss(obs, acs, rews, nonterms, reward_mask)
         self.world_model_opt.zero_grad()
         model_loss.backward()
