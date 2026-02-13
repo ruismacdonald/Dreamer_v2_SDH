@@ -48,6 +48,24 @@ def tstats(x: torch.Tensor, prefix: str) -> dict:
     }
 
 
+def _accum_numeric(running: dict, stats: dict, weight: int):
+    for k, v in stats.items():
+        # allow numpy scalars
+        if isinstance(v, np.generic):
+            v = v.item()
+        # allow 0-d torch tensors
+        elif torch.is_tensor(v):
+            if v.numel() != 1:
+                continue
+            v = v.detach().cpu().item()
+
+        # skip non-numeric (e.g. "torch.uint8")
+        if not isinstance(v, (int, float, np.integer, np.floating)):
+            continue
+
+        running[k] = running.get(k, 0.0) + float(v) * weight
+
+
 def preprocess_uint8_batch(x: torch.Tensor) -> torch.Tensor:
     # x: uint8 BCHW
     return x.to(torch.float32).div_(255.0).sub_(0.5)
@@ -270,8 +288,7 @@ class SimpleContrastiveStateDistanceModel:
                         tstats(neg_f.view(-1, *neg_f.shape[2:]), "sdm_in_neg_pre_flat")
                     )
                     bs0 = int(obs.shape[0])
-                    for k, v in input_stats.items():
-                        running[k] = running.get(k, 0.0) + float(v) * bs0
+                    _accum_numeric(running, input_stats, bs0)
                     did_input_log = True
 
                 self._optimizer.zero_grad(set_to_none=True)
@@ -280,8 +297,7 @@ class SimpleContrastiveStateDistanceModel:
                 self._optimizer.step()
 
                 bs = int(obs_f.shape[0])
-                for k, v in stats.items():
-                    running[k] = running.get(k, 0.0) + float(v) * bs
+                _accum_numeric(running, stats, bs)
                 count += bs
 
             epoch_stats = {k: v / max(count, 1) for k, v in running.items()}
