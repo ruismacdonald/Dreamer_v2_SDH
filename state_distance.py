@@ -33,9 +33,21 @@ class ContrastiveStateDistanceDataset(Dataset):
 def calculate_output_dim(net, input_shape):
     if isinstance(input_shape, int):
         input_shape = (input_shape,)
-    placeholder = torch.zeros((0,) + tuple(input_shape))
+    placeholder = torch.zeros((1,) + tuple(input_shape))
     output = net(placeholder)
     return output.size()[1:]
+
+
+def tstats(x: torch.Tensor, prefix: str) -> dict:
+    x = x.detach()
+    return {
+        f"{prefix}_shape0": float(x.shape[0]),
+        f"{prefix}_dtype": str(x.dtype),
+        f"{prefix}_min": float(x.min().item()),
+        f"{prefix}_max": float(x.max().item()),
+        f"{prefix}_mean": float(x.float().mean().item()),
+        f"{prefix}_std": float(x.float().std(unbiased=False).item()),
+    }
 
 
 def preprocess_uint8_batch(x: torch.Tensor) -> torch.Tensor:
@@ -144,39 +156,65 @@ class SimpleContrastiveStateDistanceModel:
         for i in range(data["observation"].shape[0] - 1):
             if data["terminal"][i]:
                 continue
-            observation_pairs.append(
-                (data["observation"][i], data["observation"][i + 1])
-            )
+            observation_pairs.append((data["observation"][i], data["observation"][i + 1]))
+
         train_dataset = ContrastiveStateDistanceDataset(
-            observation_pairs, num_negative_samples=self._num_negative_samples, seed=self._seed
+            observation_pairs,
+            num_negative_samples=self._num_negative_samples,
+            seed=self._seed,
         )
-        return DataLoader(train_dataset, batch_size=self._batch_size, shuffle=True, pin_memory=True, num_workers = 4, persistent_workers=True)
 
-    def calculate_loss_terms(self, obs, positive, negatives):
-        obs_repr = self._representation_net(obs)
-        pos_repr = self._representation_net(positive)
+        g = torch.Generator()
+        g.manual_seed(self._seed)
 
-        neg_repr = self._representation_net(
-            negatives.view(negatives.shape[0] * negatives.shape[1], *negatives.shape[2:])
+        def seed_worker(worker_id: int):
+            info = torch.utils.data.get_worker_info()
+            if info is None:
+                return
+            ds = info.dataset
+            seed = (self._seed + 1009 * worker_id) % (2**32 - 1)
+            if hasattr(ds, "_rng"):
+                ds._rng = np.random.default_rng(seed)
+
+        return DataLoader(
+            train_dataset,
+            batch_size=self._batch_size,
+            shuffle=True,
+            generator=g,
+            pin_memory=True,
+            num_workers=min(4, os.cpu_count() or 1),
+            persistent_workers=True,
+            worker_init_fn=seed_worker,
         )
-        neg_repr = neg_repr.view(
-            negatives.shape[0], negatives.shape[1], *neg_repr.shape[1:]
-        ).permute(1, 0, 2)  # (K, B, D)
+
+
+    def calculate_loss_terms(self, obs_f, pos_f, neg_f):
+        """
+        obs_f: (B,3,64,64) float in [-0.5, 0.5]
+        pos_f: (B,3,64,64) float in [-0.5, 0.5]
+        neg_f: (B,K,3,64,64) float in [-0.5, 0.5]
+        """
+        obs_repr = self._representation_net(obs_f)  # (B,D)
+        pos_repr = self._representation_net(pos_f)  # (B,D)
+
+        B, K = neg_f.shape[0], neg_f.shape[1]
+        neg_flat = neg_f.reshape(B * K, *neg_f.shape[2:])     # (B*K,3,64,64)
+        neg_repr = self._representation_net(neg_flat)         # (B*K,D)
+        neg_repr = neg_repr.view(B, K, -1).permute(1, 0, 2)   # (K,B,D)
 
         # positive term
-        pos_dist2 = (obs_repr - pos_repr).pow(2).sum(dim=1)   # (B,)
+        pos_dist2 = (obs_repr - pos_repr).pow(2).sum(dim=1)  # (B,)
         pos_term = pos_dist2.mean()
 
         # negative term
         neg_dist2 = (obs_repr.unsqueeze(0) - neg_repr).pow(2).sum(dim=2)  # (K,B)
         neg_mean = neg_dist2.mean()
-        neg_term = ((self._negative_distance_target - neg_mean) ** 2)
+        neg_term = (self._negative_distance_target - neg_mean).pow(2)
 
         loss = pos_term + self._negative_loss_ratio * neg_term
 
-        # collapse-ish diagnostics
         obs_norm = obs_repr.norm(dim=1).mean()
-        obs_std  = obs_repr.std(dim=0).mean()
+        obs_std = obs_repr.std(dim=0, unbiased=False).mean()
 
         stats = {
             "sdm_pos_term": float(pos_term.detach().cpu().item()),
@@ -185,41 +223,63 @@ class SimpleContrastiveStateDistanceModel:
             "sdm_loss": float(loss.detach().cpu().item()),
             "sdm_repr_norm_mean": float(obs_norm.detach().cpu().item()),
             "sdm_repr_std_mean": float(obs_std.detach().cpu().item()),
+            "sdm_obs_repr_min": float(obs_repr.min().detach().cpu().item()),
+            "sdm_obs_repr_max": float(obs_repr.max().detach().cpu().item()),
         }
         return loss, stats
+
 
     def train(self, buffer_data):
         train_loader = self.prepare_train_loader(buffer_data)
         self._representation_net.train()
-        for _ in range(self._num_training_epochs):
+
+        epoch_stats = {}
+        for _epoch in range(self._num_training_epochs):
             running = {}
             count = 0
+            did_input_log = False
 
-            for i, data in enumerate(train_loader, 0):
-                obs, positive, negatives = data  # likely uint8 if you keep it that way
+            for _i, batch in enumerate(train_loader, 0):
+                obs, positive, negatives = batch  # obs:(B,3,64,64) u8, neg:(B,K,3,64,64) u8
+
+                if not did_input_log:
+                    input_stats = {}
+                    input_stats.update(tstats(obs, "sdm_in_obs_u8"))
+                    input_stats.update(tstats(positive, "sdm_in_pos_u8"))
+                    input_stats.update(
+                        tstats(negatives.view(-1, *negatives.shape[2:]), "sdm_in_neg_u8_flat")
+                    )
 
                 obs = obs.to(self._device, non_blocking=True)
                 positive = positive.to(self._device, non_blocking=True)
                 negatives = negatives.to(self._device, non_blocking=True)
 
-                obs = preprocess_uint8_batch(obs)
-                positive = preprocess_uint8_batch(positive)
+                obs_f = preprocess_uint8_batch(obs)
+                pos_f = preprocess_uint8_batch(positive)
+                neg_f = negatives.to(torch.float32).div_(255.0).sub_(0.5)
 
-                # negatives: (B, K, C, H, W) uint8 -> float32
-                negatives = negatives.to(torch.float32).div_(255.0).sub_(0.5)
-                
-                self._optimizer.zero_grad()
-                loss, stats = self.calculate_loss_terms(obs, positive, negatives)
+                if not did_input_log:
+                    input_stats.update(tstats(obs_f, "sdm_in_obs_pre"))
+                    input_stats.update(tstats(pos_f, "sdm_in_pos_pre"))
+                    input_stats.update(
+                        tstats(neg_f.view(-1, *neg_f.shape[2:]), "sdm_in_neg_pre_flat")
+                    )
+                    bs0 = int(obs.shape[0])
+                    for k, v in input_stats.items():
+                        running[k] = running.get(k, 0.0) + float(v) * bs0
+                    did_input_log = True
+
+                self._optimizer.zero_grad(set_to_none=True)
+                loss, stats = self.calculate_loss_terms(obs_f, pos_f, neg_f)
                 loss.backward()
                 self._optimizer.step()
 
-                bs = obs.shape[0]
+                bs = int(obs_f.shape[0])
                 for k, v in stats.items():
-                    running[k] = running.get(k, 0.0) + v * bs
+                    running[k] = running.get(k, 0.0) + float(v) * bs
                 count += bs
 
             epoch_stats = {k: v / max(count, 1) for k, v in running.items()}
-            # store/print/return these
 
         self._representation_net.eval()
         sdm_out_stats = self.learn_representation_stats(buffer_data)
