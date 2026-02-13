@@ -193,20 +193,29 @@ class SimpleContrastiveStateDistanceModel:
         obs_f: (B,3,64,64) float in [-0.5, 0.5]
         pos_f: (B,3,64,64) float in [-0.5, 0.5]
         neg_f: (B,K,3,64,64) float in [-0.5, 0.5]
+
+        Positive term: Compute the squared distance between the embedding of the current observation 
+        and its true next (consecutive) observation. Minimizing this term encourages temporally 
+        adjacent states to have similar representations.
+
+        Negative term: Compute the average squared distance between the embedding of the current 
+        observation and a set of randomly sampled (non-consecutive) observations. Penalize the 
+        model if this average distance is not close to a predefined target. This pushes unrelated 
+        states apart and prevents representation collapse.
         """
         obs_repr = self._representation_net(obs_f)  # (B,D)
         pos_repr = self._representation_net(pos_f)  # (B,D)
 
         B, K = neg_f.shape[0], neg_f.shape[1]
-        neg_flat = neg_f.reshape(B * K, *neg_f.shape[2:])     # (B*K,3,64,64)
-        neg_repr = self._representation_net(neg_flat)         # (B*K,D)
-        neg_repr = neg_repr.view(B, K, -1).permute(1, 0, 2)   # (K,B,D)
+        neg_flat = neg_f.reshape(B * K, *neg_f.shape[2:])  # (B*K,3,64,64)
+        neg_repr = self._representation_net(neg_flat)  # (B*K,D)
+        neg_repr = neg_repr.view(B, K, -1).permute(1, 0, 2)  # (K,B,D)
 
-        # positive term
+        # Positive term
         pos_dist2 = (obs_repr - pos_repr).pow(2).sum(dim=1)  # (B,)
         pos_term = pos_dist2.mean()
 
-        # negative term
+        # Negative term
         neg_dist2 = (obs_repr.unsqueeze(0) - neg_repr).pow(2).sum(dim=2)  # (K,B)
         neg_mean = neg_dist2.mean()
         neg_term = (self._negative_distance_target - neg_mean).pow(2)
