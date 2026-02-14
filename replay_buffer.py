@@ -76,9 +76,9 @@ class ReplayBuffer:
         self.insert_id = np.zeros(self.size, dtype=np.int64)  # generation stamp per slot
         self._global_insert_id = 0
 
-        # Use a dedicated RNG so we never call np.random.choice() on a Python list
-        # (np.random.choice(list) converts list -> array each call, which is slow).
-        self._rng = np.random.default_rng(seed)
+        # # Use a dedicated RNG so we never call np.random.choice() on a Python list
+        # # (np.random.choice(list) converts list -> array each call, which is slow).
+        # self._rng = np.random.default_rng(seed)
 
         # SimHash-bucketed state
         if self.distance_process:
@@ -288,8 +288,7 @@ class ReplayBuffer:
 
     def get_data(self):
         data = {
-            # Keep as uint8, no torch, no float32, no normalization here
-            "observation": self.observations[: self.idx].copy(),   # uint8
+            "observation": self.observations[: self.idx].copy(),  # uint8 CHW
             "terminal": self.terminals[: self.idx].copy(),
         }
         if self.distance_process:
