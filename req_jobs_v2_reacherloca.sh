@@ -8,13 +8,13 @@
 #SBATCH --mem=32G
 #SBATCH --array=0
 #SBATCH --acctg-freq=task=1
-#SBATCH --output=/home/ruism/projects/def-rsdjjana/ruism/Dreamer_v2_SDH/results/reacherloca_v2_state_dist_run_2/%A-%a.out
-#SBATCH --error=/home/ruism/projects/def-rsdjjana/ruism/Dreamer_v2_SDH/results/reacherloca_v2_state_dist_run_2/%A-%a.err
+#SBATCH --output=/home/ruism/projects/def-rsdjjana/ruism/Dreamer_v2_SDH/results/reacherloca_v2_state_dist/%A-%a.out
+#SBATCH --error=/home/ruism/projects/def-rsdjjana/ruism/Dreamer_v2_SDH/results/reacherloca_v2_state_dist/%A-%a.err
 
 set -e -o pipefail
 
 # Top-level results dir on Lustre
-BASE_SAVE_DIR="$HOME/projects/def-rsdjjana/ruism/Dreamer_v2_SDH/results/reacherloca_v2_state_dist_run_2"
+BASE_SAVE_DIR="$HOME/projects/def-rsdjjana/ruism/Dreamer_v2_SDH/results/reacherloca_v2_state_dist"
 mkdir -p "$BASE_SAVE_DIR"
 
 # Gentle stagger so all tasks don’t hammer Lustre at once
@@ -77,7 +77,7 @@ cd "$RUN_DIR"
 python -u "$DREAMER_SRC/dreamer.py" \
   --env reacherloca-easy \
   --algo Dreamerv2 \
-  --exp-name reacherloca_v2_state_dist_run_2 \
+  --exp-name reacherloca_v2_state_dist \
   --train \
   --loca-all-phases \
   --buffer-size 2500000 \
