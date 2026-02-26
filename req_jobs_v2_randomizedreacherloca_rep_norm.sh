@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=d_v2_sdh_rr
+#SBATCH --job-name=d_v2_sdh_rr_rep_norm
 #SBATCH --account=def-rsdjjana
 #SBATCH --time=6-23:59:59
 #SBATCH --gres=gpu:1
@@ -8,13 +8,13 @@
 #SBATCH --mem=64G
 #SBATCH --array=0
 #SBATCH --acctg-freq=task=1
-#SBATCH --output=/home/ruism/projects/def-rsdjjana/ruism/Dreamer_v2_SDH_fresh/results/randomizedreacherloca_v2_state_dist/%A-%a.out
-#SBATCH --error=/home/ruism/projects/def-rsdjjana/ruism/Dreamer_v2_SDH_fresh/results/randomizedreacherloca_v2_state_dist/%A-%a.err
+#SBATCH --output=/home/ruism/projects/def-rsdjjana/ruism/Dreamer_v2_SDH_fresh/results/randomizedreacherloca_v2_rep_norm_state_dist/%A-%a.out
+#SBATCH --error=/home/ruism/projects/def-rsdjjana/ruism/Dreamer_v2_SDH_fresh/results/randomizedreacherloca_v2_rep_norm_state_dist/%A-%a.err
 
 set -e -o pipefail
 
 # Top-level results dir on Lustre
-BASE_SAVE_DIR="$HOME/projects/def-rsdjjana/ruism/Dreamer_v2_SDH_fresh/results/randomizedreacherloca_v2_state_dist"
+BASE_SAVE_DIR="$HOME/projects/def-rsdjjana/ruism/Dreamer_v2_SDH_fresh/results/randomizedreacherloca_v2_rep_norm_state_dist"
 mkdir -p "$BASE_SAVE_DIR"
 
 # Gentle stagger so all tasks don’t hammer Lustre at once
@@ -68,7 +68,7 @@ export LOCA_DATALOADER_WORKERS=0
 : "${SLURM_TMPDIR:=/tmp}"
 SEED="${SLURM_ARRAY_TASK_ID}"
 
-RUN_DIR="${SLURM_TMPDIR}/dreamer-v2-sdh-rr-${SLURM_JOB_ID:-0}-${SEED}"
+RUN_DIR="${SLURM_TMPDIR}/dreamer-v2-sdh-rr-rep-norm-${SLURM_JOB_ID:-0}-${SEED}"
 FINAL_DIR="${BASE_SAVE_DIR}/${SEED}"
 mkdir -p "$RUN_DIR" "$FINAL_DIR"
 
@@ -77,7 +77,7 @@ cd "$RUN_DIR"
 python -u "$DREAMER_SRC/dreamer.py" \
   --env randomizedreacherloca-easy \
   --algo Dreamerv2 \
-  --exp-name randomizedreacherloca_v2_state_dist \
+  --exp-name randomizedreacherloca_v2_rep_norm_state_dist \
   --train \
   --loca-all-phases \
   --buffer-size 2500000 \
@@ -88,6 +88,7 @@ python -u "$DREAMER_SRC/dreamer.py" \
   --loca-hash-size 32 \
   --loca-hash-count 2000 \
   --kl-loss-coeff 0.1 \
+  --normalize-representation \
   --seed "${SEED}"
 
 
