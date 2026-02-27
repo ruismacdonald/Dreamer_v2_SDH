@@ -1,10 +1,10 @@
 #!/bin/bash
 #SBATCH --job-name=d_v2_sdh_rr_10
-#SBATCH --account=def-rsdjjana
+#SBATCH --account=def-rsdjjana_gpu
 #SBATCH --time=6-23:59:59
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
-#SBATCH --exclude=ng[11105,30708]
+#SBATCH --exclude=ng[11105-11106]
 #SBATCH --mem=64G
 #SBATCH --array=0-9
 #SBATCH --acctg-freq=task=1
