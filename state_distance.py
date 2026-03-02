@@ -65,10 +65,10 @@ class ContrastiveStateDistanceNet(nn.Module):
         self.conv = torch.nn.Sequential(*conv_seq)
 
         mlp_in_dim = calculate_output_dim(self.conv, in_dim)
-        mlp_modules = [nn.Linear(np.prod(mlp_in_dim), mlp_layers[0]), torch.nn.ReLU()]
+        mlp_modules = [nn.Linear(np.prod(mlp_in_dim), mlp_layers[0]), torch.nn.Tanh()]
         for i in range(len(mlp_layers) - 2):
             mlp_modules.append(nn.Linear(mlp_layers[i], mlp_layers[i + 1]))
-            mlp_modules.append(torch.nn.ReLU())
+            mlp_modules.append(torch.nn.Tanh())
         mlp_modules.append(nn.Linear(mlp_layers[-2], mlp_layers[-1]))
         self.mlp = torch.nn.Sequential(*mlp_modules)
 
