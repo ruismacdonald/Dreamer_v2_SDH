@@ -1,20 +1,20 @@
 #!/bin/bash
-#SBATCH --job-name=d_v2_sdh_r_rep_norm
-#SBATCH --account=def-rsdjjana
+#SBATCH --job-name=d_v2_sdh_r_10_rep_norm
+#SBATCH --account=def-rsdjjana_gpu
 #SBATCH --time=6-23:59:59
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
-#SBATCH --exclude=ng[11105,30708]
+#SBATCH --exclude=ng[11105-11106]
 #SBATCH --mem=64G
-#SBATCH --array=0
+#SBATCH --array=0-9
 #SBATCH --acctg-freq=task=1
-#SBATCH --output=/home/ruism/projects/def-rsdjjana/ruism/Dreamer_v2_SDH_fresh/results/reacherloca_v2_rep_norm_state_dist/%A-%a.out
-#SBATCH --error=/home/ruism/projects/def-rsdjjana/ruism/Dreamer_v2_SDH_fresh/results/reacherloca_v2_rep_norm_state_dist/%A-%a.err
+#SBATCH --output=/home/ruism/projects/def-rsdjjana/ruism/Dreamer_v2_SDH/results/reacherloca_v2_rep_norm_state_dist_10_seeds/%A-%a.out
+#SBATCH --error=/home/ruism/projects/def-rsdjjana/ruism/Dreamer_v2_SDH/results/reacherloca_v2_rep_norm_state_dist_10_seeds/%A-%a.err
 
 set -e -o pipefail
 
 # Top-level results dir on Lustre
-BASE_SAVE_DIR="$HOME/projects/def-rsdjjana/ruism/Dreamer_v2_SDH_fresh/results/reacherloca_v2_rep_norm_state_dist"
+BASE_SAVE_DIR="$HOME/projects/def-rsdjjana/ruism/Dreamer_v2_SDH/results/reacherloca_v2_rep_norm_state_dist_10_seeds"
 mkdir -p "$BASE_SAVE_DIR"
 
 # Gentle stagger so all tasks don’t hammer Lustre at once
@@ -60,7 +60,7 @@ export OMP_PLACES=cores
 export SLURM_CPU_BIND=cores
 
 # Source code
-DREAMER_SRC="$HOME/projects/def-rsdjjana/ruism/Dreamer_v2_SDH_fresh"
+DREAMER_SRC="$HOME/projects/def-rsdjjana/ruism/Dreamer_v2_SDH"
 export PYTHONPATH="$DREAMER_SRC:${PYTHONPATH:-}"
 
 export LOCA_DATALOADER_WORKERS=0
@@ -77,7 +77,7 @@ cd "$RUN_DIR"
 python -u "$DREAMER_SRC/dreamer.py" \
   --env reacherloca-easy \
   --algo Dreamerv2 \
-  --exp-name reacherloca_v2_rep_norm_state_dist \
+  --exp-name reacherloca_v2_rep_norm_state_dist_10_seeds \
   --train \
   --loca-all-phases \
   --buffer-size 2500000 \
@@ -88,7 +88,7 @@ python -u "$DREAMER_SRC/dreamer.py" \
   --loca-hash-size 32 \
   --loca-hash-count 2000 \
   --kl-loss-coeff 0.1 \
-  --normalize-representation \
+  --normalize-representations \
   --seed "${SEED}"
 
 rsync -a --partial --inplace --no-whole-file "$RUN_DIR/" "$FINAL_DIR/"
