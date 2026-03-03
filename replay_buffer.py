@@ -1,6 +1,8 @@
 import torch
 import numpy as np
 from collections import deque
+import os
+import pickle
 
 
 class ReplayBuffer:
@@ -297,3 +299,89 @@ class ReplayBuffer:
         if self.distance_process:
             data.update({"loca_indices_flat": self.loca_indices_flat.copy()})
         return data
+    
+    def save(self, dname: str, fname: str = "replay_buffer.pkl") -> None:
+        os.makedirs(dname, exist_ok=True)
+        path = os.path.join(dname, fname)
+
+        payload = {
+            # config
+            "size": self.size,
+            "obs_shape": self.obs_shape,
+            "action_size": self.action_size,
+            "seq_len": self.seq_len,
+            "batch_size": self.batch_size,
+            "distance_process": self.distance_process,
+
+            # ring state
+            "idx": self.idx,
+            "full": self.full,
+            "steps": self.steps,
+            "episodes": self.episodes,
+
+            # arrays
+            "observations": self.observations,
+            "actions": self.actions,
+            "rewards": self.rewards,
+            "terminals": self.terminals,
+            "reward_mask": self.reward_mask,
+
+            # distance-process bookkeeping
+            "loca_indices": self.loca_indices,
+            "loca_indices_flat": self.loca_indices_flat,
+            "flat_pos": self.flat_pos,
+            "insert_id": self.insert_id,
+            "_global_insert_id": self._global_insert_id,
+
+            # SimHash params (may be None until first rep arrives)
+            "hash_bits": getattr(self, "hash_bits", None),
+            "fifo_capacity": getattr(self, "fifo_capacity", None),
+            "packbit_order": getattr(self, "packbit_order", None),
+            "_seed": getattr(self, "_seed", None),
+            "obs_repr_size": getattr(self, "obs_repr_size", None),
+            "A_latent": getattr(self, "A_latent", None),
+        }
+
+        with open(path, "wb") as f:
+            pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+    def load(self, dname: str, fname: str = "replay_buffer.pkl") -> None:
+        path = os.path.join(dname, fname)
+        with open(path, "rb") as f:
+            payload = pickle.load(f)
+
+        assert payload["size"] == self.size
+        assert payload["seq_len"] == self.seq_len
+        assert payload["batch_size"] == self.batch_size
+        assert payload["distance_process"] == self.distance_process
+        assert tuple(payload["obs_shape"]) == self.obs_shape
+        assert payload["action_size"] == self.action_size
+
+        # ring state
+        self.idx = payload["idx"]
+        self.full = payload["full"]
+        self.steps = payload["steps"]
+        self.episodes = payload["episodes"]
+
+        # arrays
+        self.observations = payload["observations"]
+        self.actions = payload["actions"]
+        self.rewards = payload["rewards"]
+        self.terminals = payload["terminals"]
+        self.reward_mask = payload["reward_mask"]
+
+        # distance-process bookkeeping
+        self.loca_indices = payload["loca_indices"]
+        self.loca_indices_flat = payload["loca_indices_flat"]
+        self.flat_pos = payload["flat_pos"]
+        self.insert_id = payload["insert_id"]
+        self._global_insert_id = payload["_global_insert_id"]
+
+        # SimHash params
+        if self.distance_process:
+            self.hash_bits = payload["hash_bits"]
+            self.fifo_capacity = payload["fifo_capacity"]
+            self.packbit_order = payload["packbit_order"]
+            self._seed = payload["_seed"]
+            self.obs_repr_size = payload["obs_repr_size"]
+            self.A_latent = payload["A_latent"]

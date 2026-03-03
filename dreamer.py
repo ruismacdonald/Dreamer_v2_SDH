@@ -64,7 +64,7 @@ class Dreamer:
         self,
         args,
         obs_shape,
-        action_size,
+        action_size, 
         device,
         restore=False,
         loca_state_distance=False,
@@ -814,25 +814,27 @@ def main():
         state_distance_model = SimpleContrastiveStateDistanceModel(
             obs_shape, torch.optim.Adam, device=device, normalize_representations=args.normalize_representations
         )
+        if args.skip_sdm_train:
+            state_distance_model.load(args.distance_model_path)
+        else:
+            print("Start state distance learning process.")
+            num_state_distance_steps = 100000
+            _ = dreamer.collect_random_episodes(
+                train_env, num_state_distance_steps // args.action_repeat
+            )
 
-        print("Start state distance learning process.")
-        num_state_distance_steps = 100000
-        _ = dreamer.collect_random_episodes(
-            train_env, num_state_distance_steps // args.action_repeat
-        )
+            print("Start training state distance model.")
+            
+            state_distance_model.train(dreamer.data_buffer.get_data())
+            print("normalize:", state_distance_model._normalize_representations,
+                    "mean set:", state_distance_model._repr_mean is not None,
+                    "std set:", state_distance_model._repr_std is not None)
 
-        print("Start training state distance model.")
-        
-        state_distance_model.train(dreamer.data_buffer.get_data())
-        print("normalize:", state_distance_model._normalize_representations,
-                "mean set:", state_distance_model._repr_mean is not None,
-                "std set:", state_distance_model._repr_std is not None)
-
-        ckpt_dir = os.path.join(logdir, "ckpts/")
-        if not (os.path.exists(ckpt_dir)):
-            os.makedirs(ckpt_dir)
-        state_distance_model.save(ckpt_dir)
-        print("Finish state distance learning process.")
+            ckpt_dir = os.path.join(logdir, "ckpts/")
+            if not (os.path.exists(ckpt_dir)):
+                os.makedirs(ckpt_dir)
+            state_distance_model.save(ckpt_dir)
+            print("Finish state distance learning process.")
 
         dreamer = Dreamer(
             args,
@@ -843,12 +845,19 @@ def main():
             loca_state_distance=True,
             state_distance_model=state_distance_model,
         )
+        if args.experience_replay:
+            dreamer.data_buffer.load(args.experience_replay, fname="replay_phase_1.pkl")
+            assert dreamer.data_buffer.steps > 0, "Loaded replay but steps==0; wrong directory/file?"
+            assert len(dreamer.data_buffer.loca_indices_flat) > 0, "Loaded replay but no kept starts?"
 
     if args.train:
         initial_logs = OrderedDict()
-        seed_episode_rews = dreamer.collect_random_episodes(
-            train_env, args.seed_steps // args.action_repeat
-        )
+        if not args.experience_replay:
+            seed_episode_rews = dreamer.collect_random_episodes(
+                train_env, args.seed_steps // args.action_repeat
+            )
+        else:
+            seed_episode_rews = np.array([0.0])
         global_step = dreamer.data_buffer.steps * args.action_repeat
 
         # without loss of generality initial rews for both train and eval are assumed same
@@ -894,6 +903,7 @@ def main():
                 if not (os.path.exists(ckpt_dir)):
                     os.makedirs(ckpt_dir)
                 dreamer.save(os.path.join(ckpt_dir, f"models_{loca_phase}.pt"))
+                dreamer.data_buffer.save(ckpt_dir, fname=f"replay_{loca_phase}.pkl")
 
                 # Switch phase
                 loca_phase = "phase_2"
@@ -914,6 +924,7 @@ def main():
                 if not (os.path.exists(ckpt_dir)):
                     os.makedirs(ckpt_dir)
                 dreamer.save(os.path.join(ckpt_dir, f"models_{loca_phase}.pt"))
+                dreamer.data_buffer.save(ckpt_dir, fname=f"replay_{loca_phase}.pkl")
 
                 loca_phase = "phase_3"
                 train_env = make_env(args, loca_phase, "train")

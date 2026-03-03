@@ -91,3 +91,24 @@ python -u "$DREAMER_SRC/dreamer.py" \
   --seed "${SEED}"
 
 rsync -a --partial --inplace --no-whole-file "$RUN_DIR/" "$FINAL_DIR/"
+
+# CKPT_DIR="$BASE_SAVE_DIR/${SEED}/phase_1/ckpts"
+
+# python -u "$DREAMER_SRC/dreamer.py" \
+#   --env reacherloca-easy \
+#   --algo Dreamerv2 \
+#   --exp-name reacherloca_v2_state_dist_10_seeds \
+#   --train \
+#   --loca-phase phase_2 \
+#   --loca-phase2-steps 1500000 \
+#   --buffer-size 2500000 \
+#   --loca-state-distance \
+#   --loca-hash-size 32 \
+#   --loca-hash-count 2000 \
+#   --kl-loss-coeff 0.1 \
+#   --seed "${SEED}" \
+#   --restore \
+#   --checkpoint-path "${CKPT_DIR}/models_phase_1.pt" \
+#   --experience-replay "${CKPT_DIR}" \
+#   --skip-sdm-train \
+#   --distance-model-path "${CKPT_DIR}"
